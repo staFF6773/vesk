@@ -13,7 +13,7 @@ inyecta [Vencord](https://github.com/Vendicated/Vencord) al inicio del documento
 Verificado en NixOS (Hyprland, Wayland nativo y XWayland): compila con Tauri 2.12.5 y
 WebKitGTK 2.54.1, carga la pantalla de login de Discord y Vencord queda inyectado
 (`window.Vencord` es un objeto y el bundle aplica sus estilos). `cargo test` cubre la
-traduccion de `discord://` y el filtro de navegacion.
+traduccion de `discord://`, el filtro de navegacion, el arte embebido y los flags de CEF.
 
 ## Rendimiento (leer antes de tocar el entorno)
 
@@ -42,6 +42,30 @@ https). Para el binario fuera del shell:
 
 - instala los esquemas en el sistema (`environment.systemPackages = [ pkgs.gsettings-desktop-schemas ];`), o
 - envuelve el paquete con `wrapGAppsHook4`, que rellena `XDG_DATA_DIRS` y `GSETTINGS_SCHEMA_DIR`.
+
+## Optimizaciones al estilo OpenAsar
+
+Vesk aplica en el contenedor lo que OpenAsar hace en el proceso principal de Electron:
+
+- **Flags de GPU en CEF**: tres presets en `VESK_GPU_PERF`.
+  - `full`: el preset de OpenAsar (zero-copy, `--ignore-gpu-blocklist`, overlays,
+    `EnableDrDc`, `CanvasOopRasterization`, sin Vulkan). Es el defecto en GPUs Mesa.
+  - `safe` (defecto con el driver propietario de NVIDIA): solo rasterizado por GPU y
+    `WebAssemblyLazyCompilation`. Zero-copy y overlays piden GpuMemoryBuffer, que ese
+    driver no expone bajo X11: el proceso GPU muere con SIGSEGV/SIGTRAP al rasterizar
+    un canvas.
+  - `0`: sin flags nuevos.
+- **Sin telemetria**: `/api/v*/science` y `/api/v*/metrics` se responden con un 204 antes
+  de que Discord registre sus modulos, y Sentry se apaga en cuanto se inicializa.
+  `VESK_NO_TRACK=0` lo desactiva.
+- **Optimizador de DOM**: retrasa 100 ms el `removeChild` de los nodos de actividad de la
+  lista de miembros, que React reescribe constantemente. `VESK_DOM_OPTIMIZER=0` lo
+  desactiva.
+- **Latencia de audio**: `PULSE_LATENCY_MSEC=30` para la voz.
+- **Splash ligero**: el arte embebido en el script de inyeccion pasa de 121 KB a 30 KB en
+  base64 (copia de 256x256 en `assets/splash.jpg`).
+- **Preconexion** a `cdn.discordapp.com`, `media.discordapp.net` y `gateway.discord.gg`
+  antes de que Discord los pida.
 
 ## Que funciona
 

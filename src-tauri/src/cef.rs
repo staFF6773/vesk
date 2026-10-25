@@ -15,6 +15,12 @@ pub fn configure_env() {
     if std::env::var_os("__NV_DISABLE_EXPLICIT_SYNC").is_none() {
         std::env::set_var("__NV_DISABLE_EXPLICIT_SYNC", "1");
     }
+
+    // 30 ms de buffer de audio: lo mismo que fija OpenAsar para que la voz no
+    // acumule latencia en PulseAudio/PipeWire.
+    if std::env::var_os("PULSE_LATENCY_MSEC").is_none() {
+        std::env::set_var("PULSE_LATENCY_MSEC", "30");
+    }
 }
 
 pub fn configure() {
@@ -27,7 +33,49 @@ pub fn configure() {
     });
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GpuPreset {
+    /// Sin flags nuevos: el comportamiento de siempre.
+    Off,
+    /// Rasterizado por GPU y mejoras que no tocan GpuMemoryBuffer.
+    Safe,
+    /// Preset completo de OpenAsar: zero-copy, overlays y sin blocklist.
+    Full,
+}
+
+/// El preset completo pide GpuMemoryBuffer para zero-copy y overlays. El driver
+/// propietario de NVIDIA bajo X11 no lo expone (gmb_type vacio), asi que el
+/// proceso GPU muere con SIGTRAP en cuanto se rasteriza un canvas. En ese caso
+/// arrancamos en conservador y el preset completo queda como opt-in.
+fn gpu_preset() -> GpuPreset {
+    match std::env::var("VESK_GPU_PERF") {
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "0" | "false" | "no" | "off" => GpuPreset::Off,
+            "full" | "aggressive" | "openasar" => GpuPreset::Full,
+            _ => GpuPreset::Safe,
+        },
+        Err(_) => {
+            if std::path::Path::new("/dev/nvidiactl").exists() {
+                GpuPreset::Safe
+            } else {
+                GpuPreset::Full
+            }
+        }
+    }
+}
+
 fn command_line_args() -> Vec<(String, Option<String>)> {
+    // El runtime fusiona disable-features/enable-features con las que ya fija
+    // CEF, asi que basta con una entrada por switch.
+    let mut disabled = String::from(
+        "SpareRendererForSitePerProcess,IntensiveWakeUpThrottling,\
+         AllowAggressiveThrottlingWithWebSocket,UseEcoQoSForBackgroundProcess,\
+         LocalNetworkAccessChecks,LocalNetworkAccessChecksWebSocket,\
+         LocalNetworkAccessChecksWebRTC",
+    )
+    .replace(' ', "");
+
+    let mut enabled = String::new();
     let mut args = vec![
         ("--disable-gpu-sandbox".into(), None),
         ("--disable-background-timer-throttling".into(), None),
@@ -38,16 +86,41 @@ fn command_line_args() -> Vec<(String, Option<String>)> {
             Some("no-user-gesture-required".into()),
         ),
         ("--renderer-process-limit".into(), Some("2".into())),
-        (
-            "disable-features".into(),
-            Some(
-                "SpareRendererForSitePerProcess,IntensiveWakeUpThrottling,\
-                 LocalNetworkAccessChecks,LocalNetworkAccessChecksWebSocket,\
-                 LocalNetworkAccessChecksWebRTC"
-                    .replace(' ', ""),
-            ),
-        ),
     ];
+
+    match gpu_preset() {
+        GpuPreset::Off => {}
+        GpuPreset::Safe => {
+            args.push(("--enable-gpu-rasterization".into(), None));
+            enabled.push_str(
+                "ThrottleDisplayNoneAndVisibilityHiddenCrossOriginIframes,\
+                 WebAssemblyLazyCompilation",
+            );
+        }
+        GpuPreset::Full => {
+            args.extend([
+                ("--enable-gpu-rasterization".into(), None),
+                ("--enable-zero-copy".into(), None),
+                ("--ignore-gpu-blocklist".into(), None),
+                (
+                    "--enable-hardware-overlays".into(),
+                    Some("single-fullscreen,single-on-top,underlay".into()),
+                ),
+            ]);
+            enabled.push_str(
+                "EnableDrDc,CanvasOopRasterization,\
+                 ThrottleDisplayNoneAndVisibilityHiddenCrossOriginIframes,\
+                 WebAssemblyLazyCompilation",
+            );
+            disabled.push_str(",Vulkan");
+        }
+    }
+
+    if !enabled.is_empty() {
+        args.push(("enable-features".into(), Some(enabled.replace(' ', ""))));
+    }
+
+    args.push(("disable-features".into(), Some(disabled)));
 
     if let Ok(extra) = std::env::var("VESK_CEF_ARGS") {
         for arg in extra.split(',').map(str::trim).filter(|arg| !arg.is_empty()) {
@@ -252,6 +325,64 @@ mod tests {
         assert!(is_discord_origin(&origin("https://ptb.discord.com")));
         assert!(is_discord_origin(&origin("https://discordapp.com")));
         assert!(is_discord_origin(&origin("https://cdn.discordapp.com")));
+    }
+
+    fn arg<'a>(args: &'a [(String, Option<String>)], name: &str) -> &'a str {
+        args.iter()
+            .find(|(key, _)| key == name)
+            .and_then(|(_, value)| value.as_deref())
+            .unwrap_or("")
+    }
+
+    fn args_for(preset: &str) -> Vec<(String, Option<String>)> {
+        std::env::set_var("VESK_GPU_PERF", preset);
+        std::env::remove_var("VESK_CEF_ARGS");
+        command_line_args()
+    }
+
+    fn has(args: &[(String, Option<String>)], name: &str) -> bool {
+        args.iter().any(|(key, _)| key == name)
+    }
+
+    #[test]
+    fn presets_de_gpu() {
+        // Completo: todo el preset de OpenAsar.
+        let full = args_for("full");
+        for flag in [
+            "--enable-gpu-rasterization",
+            "--enable-zero-copy",
+            "--ignore-gpu-blocklist",
+        ] {
+            assert!(has(&full, flag), "falta {flag}");
+        }
+        assert!(arg(&full, "enable-features").contains("EnableDrDc"));
+        assert!(arg(&full, "disable-features").contains("Vulkan"));
+
+        // Conservador: nada que pida GpuMemoryBuffer (el crash con NVIDIA).
+        let safe = args_for("safe");
+        assert!(has(&safe, "--enable-gpu-rasterization"));
+        assert!(!has(&safe, "--enable-zero-copy"));
+        assert!(!has(&safe, "--ignore-gpu-blocklist"));
+        assert!(!arg(&safe, "enable-features").contains("EnableDrDc"));
+        assert!(!arg(&safe, "disable-features").contains("Vulkan"));
+
+        // Apagado: solo los flags de siempre.
+        let off = args_for("0");
+        assert!(!has(&off, "--enable-gpu-rasterization"));
+        assert!(arg(&off, "enable-features").is_empty());
+
+        std::env::remove_var("VESK_GPU_PERF");
+    }
+
+    #[test]
+    fn un_solo_disable_features() {
+        std::env::remove_var("VESK_CEF_ARGS");
+        let args = command_line_args();
+        let count = args
+            .iter()
+            .filter(|(key, _)| key == "disable-features")
+            .count();
+        assert_eq!(count, 1);
     }
 
     #[test]

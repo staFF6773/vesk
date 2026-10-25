@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -43,12 +44,18 @@ const VENCORD_SETTINGS_ENTRIES: &str = r#"o({key:"vencord_main",title:"Vencord",
 /// Vesk solo muestra informacion: no hay pestanas de plugins ni de temas.
 const VESK_SETTINGS_ENTRY: &str = r#"o({key:"vesk_main",title:"Vesk",panelTitle:"Acerca de Vesk",Component:window.__VESK_ABOUT__,Icon:Jh})"#;
 
-/// Arte original del programa, embebido para el banner de los ajustes.
-const VESK_ART: &[u8] = include_bytes!("../../assets/icon-source.jpeg");
+/// Arte original del programa, embebido para el splash y el banner de los
+/// ajustes. Es una copia de 256x256: el original pesa 90 KB y solo se pinta a
+/// 104 px, asi que en base64 anadia ~120 KB al script de inyeccion.
+const VESK_ART: &[u8] = include_bytes!("../../assets/splash.jpg");
 
-/// Codifica el arte como data URI sin anadir dependencias.
-fn vesk_art_data_uri() -> String {
-    data_uri("image/jpeg", VESK_ART)
+/// Codifica el arte como data URI sin anadir dependencias. Se cachea porque el
+/// script de inyeccion lo pide en cada arranque.
+fn vesk_art_data_uri() -> &'static str {
+    static CACHE: OnceLock<String> = OnceLock::new();
+    CACHE
+        .get_or_init(|| data_uri("image/jpeg", VESK_ART))
+        .as_str()
 }
 
 fn data_uri(mime: &str, bytes: &[u8]) -> String {
@@ -79,6 +86,18 @@ fn data_uri(mime: &str, bytes: &[u8]) -> String {
     }
 
     out
+}
+
+/// Interruptor de entorno: 0/false/no/off lo apaga, ausente usa el valor por
+/// defecto.
+pub(crate) fn env_flag(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(value) => !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+        Err(_) => default,
+    }
 }
 
 static TRAY_HINTED: AtomicBool = AtomicBool::new(false);
@@ -262,6 +281,103 @@ fn injection_script(vault: Option<&SessionVault>) -> String {
       return { abort: () => controller.abort() };
     };
   }
+
+  // --- Parches de arranque al estilo OpenAsar ---
+  // Se instalan antes que el bundle de Discord, que es cuando sirven: la
+  // telemetria sale en los primeros segundos y Sentry se inicializa al cargar
+  // el cliente.
+  const NO_TRACK = __VESK_NO_TRACK__;
+  const DOM_OPTIMIZER = __VESK_DOM_OPTIMIZER__;
+
+  if (NO_TRACK) {
+    // /api/v9/science y /api/v9/metrics son solo telemetria. OpenAsar cancela
+    // la peticion; devolver un 204 evita ademas que Discord registre un error
+    // de red en la consola.
+    const TRACKED = /\/api\/v\d+\/(?:science|metrics)(?:[/?]|$)/;
+
+    const nativeFetch = window.fetch;
+    if (typeof nativeFetch === "function") {
+      window.fetch = function (input, init) {
+        try {
+          const url = typeof input === "string" ? input : (input && input.url) || "";
+          if (TRACKED.test(url)) {
+            return Promise.resolve(new Response(null, { status: 204, statusText: "No Content" }));
+          }
+        } catch (e) {}
+        return nativeFetch.apply(this, arguments);
+      };
+    }
+
+    const nativeBeacon = navigator.sendBeacon;
+    if (typeof nativeBeacon === "function") {
+      navigator.sendBeacon = function (url) {
+        if (TRACKED.test(String(url))) return true;
+        return nativeBeacon.apply(this, arguments);
+      };
+    }
+  }
+
+  // Sentry: Discord lo inicializa desde su bundle. Esperamos a que exista y lo
+  // apagamos, restaurando los console.* que instrumenta.
+  if (NO_TRACK) {
+    let attempts = 0;
+    const timer = window.setInterval(() => {
+      attempts++;
+      try {
+        const hub = window.__SENTRY__ && window.__SENTRY__.hub;
+        const client = hub && hub.getClient && hub.getClient();
+        const options = client && client.getOptions && client.getOptions();
+        if (options) options.enabled = false;
+        Object.keys(console).forEach((key) => {
+          const original = console[key] && console[key].__sentry_original__;
+          if (original) console[key] = original;
+        });
+      } catch (e) {}
+      if (attempts >= 20) window.clearInterval(timer);
+    }, 1000);
+  }
+
+  // Optimizador de DOM: la lista de miembros reescribe las actividades cada
+  // pocos segundos y React desmonta y vuelve a montar nodos. Retrasar 100 ms el
+  // removeChild de esos nodos evita el parpadeo y el coste de layout (el mismo
+  // truco que OpenAsar).
+  if (DOM_OPTIMIZER && typeof Element !== "undefined") {
+    const nativeRemoveChild = Element.prototype.removeChild;
+    Element.prototype.removeChild = function (child) {
+      if (
+        child &&
+        typeof child.className === "string" &&
+        child.className.indexOf("activity") !== -1
+      ) {
+        const parent = this;
+        const args = arguments;
+        window.setTimeout(() => {
+          try {
+            nativeRemoveChild.apply(parent, args);
+          } catch (e) {}
+        }, 100);
+        return child;
+      }
+      return nativeRemoveChild.apply(this, arguments);
+    };
+  }
+
+  // Preconexion a los origenes que Discord usa despues del documento inicial.
+  (() => {
+    const root = document.head || document.documentElement;
+    if (!root) return;
+    [
+      "https://cdn.discordapp.com",
+      "https://media.discordapp.net",
+      "https://gateway.discord.gg",
+    ].forEach((href) => {
+      const link = document.createElement("link");
+      link.rel = "preconnect";
+      link.href = href;
+      link.crossOrigin = "anonymous";
+      root.appendChild(link);
+    });
+  })();
 
   window.__VESK__ = {
     shell: "tauri",
@@ -498,8 +614,10 @@ fn injection_script(vault: Option<&SessionVault>) -> String {
         const rendered = !!mount && mount.childElementCount > 0;
         // Discord pinta su propio loader antes de la UI real: esperamos a la
         // pantalla de login (authBox) o a la barra de servidores (guilds).
+        // Con el arbol vacio el selector no puede coincidir: nos ahorramos el
+        // recorrido del DOM en cada tick mientras Discord monta.
         const ui =
-          !!mount &&
+          rendered &&
           !!mount.querySelector('[class*="authBox"], [class*="guilds"]');
 
         if (ui || (loaded && rendered && elapsed > 10000)) {
@@ -520,18 +638,17 @@ fn injection_script(vault: Option<&SessionVault>) -> String {
       return;
     }
 
-    // initialization_script corre antes de que exista <body>: esperamos a que
-    // el parser lo cree, que ocurre antes de ejecutar los scripts de Discord.
-    // <body> es hijo directo de <html>: observar todo el subarbol durante el
-    // parseo de Discord dispara miles de callbacks sin necesidad.
+    // initialization_script corre antes de que exista <html> (CEF crea el
+    // documento vacio): observar documentElement no sirve si aun es null, y
+    // observar document sin subtree solo ve aparecer <html>, no <body>. Con
+    // subtree vemos <body> aparezca donde aparezca y desconectamos en el acto,
+    // antes de que el parser llegue a los scripts de Discord.
     const observer = new MutationObserver(() => {
       if (!document.body) return;
       observer.disconnect();
       show();
     });
-    observer.observe(document.documentElement || document, {
-      childList: true,
-    });
+    observer.observe(document, { childList: true, subtree: true });
   })();
 })();
 "##;
@@ -545,7 +662,23 @@ fn injection_script(vault: Option<&SessionVault>) -> String {
     let bridge = BRIDGE
         .replace("__VESK_ENGINE__", engine)
         .replace("__VESK_VERSION__", env!("CARGO_PKG_VERSION"))
-        .replace("__VESK_ICON__", &art);
+        .replace("__VESK_ICON__", art)
+        .replace(
+            "__VESK_NO_TRACK__",
+            if env_flag("VESK_NO_TRACK", true) {
+                "true"
+            } else {
+                "false"
+            },
+        )
+        .replace(
+            "__VESK_DOM_OPTIMIZER__",
+            if env_flag("VESK_DOM_OPTIMIZER", true) {
+                "true"
+            } else {
+                "false"
+            },
+        );
     let bundle = vencord_bundle();
 
     let mut script = String::with_capacity(prefix.len() + bridge.len() + bundle.len() + 1);
@@ -762,6 +895,29 @@ mod tests {
         assert!(script.contains("vesk-splash"));
         assert!(script.contains("@keyframes vesk-spin"));
         assert!(script.contains("Cargando Discord..."));
+        // CEF ejecuta el script antes de que exista <html>: el observador tiene
+        // que mirar el subarbol de document o <body> nunca se ve.
+        assert!(script.contains("subtree: true"));
+    }
+
+    #[test]
+    fn arte_ligero() {
+        let uri = vesk_art_data_uri();
+        assert!(uri.starts_with("data:image/jpeg;base64,"));
+        // 256x256: ~30 KB en base64. Si vuelve a crecer, el script de
+        // inyeccion se hincha en cada documento.
+        assert!(uri.len() < 40_000, "el arte embebido pesa {}", uri.len());
+    }
+
+    #[test]
+    fn parches_de_arranque() {
+        let script = injection_script(None);
+        assert!(script.contains("__SENTRY__"));
+        assert!(script.contains("science|metrics"));
+        assert!(script.contains("removeChild"));
+        assert!(script.contains("preconnect"));
+        assert!(!script.contains("__VESK_NO_TRACK__"));
+        assert!(!script.contains("__VESK_DOM_OPTIMIZER__"));
     }
 
     #[test]

@@ -398,6 +398,7 @@ fn injection_script(vault: Option<&SessionVault>) -> String {
   window.__VESK__ = {
     shell: "tauri",
     engine: "__VESK_ENGINE__",
+    window: "__VESK_WINDOWING__",
     version: "__VESK_VERSION__",
     art: "__VESK_ICON__",
   };
@@ -421,6 +422,7 @@ fn injection_script(vault: Option<&SessionVault>) -> String {
     const version = (window.__VESK__ && window.__VESK__.version) || "";
     const art = (window.__VESK__ && window.__VESK__.art) || "";
     const engine = (window.__VESK__ && window.__VESK__.engine) || "webkit";
+    const windowing = (window.__VESK__ && window.__VESK__.window) || "x11";
     const titleStyle = {
       color: "var(--header-primary)",
       fontSize: 12,
@@ -509,7 +511,9 @@ fn injection_script(vault: Option<&SessionVault>) -> String {
         "Vencord inyectado al inicio del documento",
         "Voz y video con WebRTC de Chromium (CEF)",
         "Bandeja del sistema: mostrar, recargar, cerrar sesion, salir",
-        "Sesion persistente y tamano/posicion de ventana",
+        windowing === "wayland"
+          ? "Sesion persistente; el compositor decide tamano y posicion"
+          : "Sesion persistente y tamano/posicion de ventana",
         "Enlaces externos en el navegador del sistema",
       ] : [
         "Cliente web de Discord y enlaces discord://",
@@ -522,7 +526,9 @@ fn injection_script(vault: Option<&SessionVault>) -> String {
         "Compartir pantalla con audio del sistema requiere venmic/PipeWire (pendiente)",
         "Sin arrpc, Krisp ni codecs propietarios",
         "Notificaciones dependen del portal del escritorio",
-        "Ejecucion sobre XWayland; el backend Wayland nativo aun no es estable",
+        windowing === "wayland"
+          ? "Wayland nativo: sin posicion global; el tamano se fija al crear la ventana"
+          : "XWayland; VESK_GDK_BACKEND=wayland usa el backend nativo",
       ] : [
         "Compartir pantalla no funciona (WebKitGTK no implementa getDisplayMedia)",
         "Voz y video no disponibles: WebKitGTK no expone WebRTC",
@@ -675,8 +681,21 @@ fn injection_script(vault: Option<&SessionVault>) -> String {
     } else {
         "webkit"
     };
+    #[cfg(all(feature = "cef", target_os = "linux"))]
+    let windowing = if cef::native_wayland() {
+        "wayland"
+    } else {
+        "x11"
+    };
+    #[cfg(not(all(feature = "cef", target_os = "linux")))]
+    let windowing = if std::env::var("GDK_BACKEND").as_deref() == Ok("wayland") {
+        "wayland"
+    } else {
+        "x11"
+    };
     let bridge = BRIDGE
         .replace("__VESK_ENGINE__", engine)
+        .replace("__VESK_WINDOWING__", windowing)
         .replace("__VESK_VERSION__", env!("CARGO_PKG_VERSION"))
         .replace("__VESK_ICON__", art)
         .replace(
@@ -919,6 +938,7 @@ mod tests {
         let script = injection_script(None);
         assert!(!script.contains("__VESK_ICON__"));
         assert!(!script.contains("__VESK_VERSION__"));
+        assert!(!script.contains("__VESK_WINDOWING__"));
         assert!(script.contains(r#"data:image/jpeg;base64,"#));
         assert!(script.contains("window.__VESK_ABOUT__"));
     }

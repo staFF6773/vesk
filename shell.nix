@@ -100,9 +100,12 @@ pkgs.mkShell {
     # assertion 'source != NULL' failed" (tauri-apps/tauri#14187 en NixOS).
     export XDG_DATA_DIRS="${pkgs.gsettings-desktop-schemas}/share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}:${pkgs.gtk3}/share/gsettings-schemas/${pkgs.gtk3.name}:''${XDG_DATA_DIRS:-/run/current-system/sw/share}"
 
-    # CEF solo esta verificado en X11. En Wayland se ejecuta bajo XWayland.
-    # Para el backend wry: VESK_GDK_BACKEND=wayland.
-    export GDK_BACKEND="''${VESK_GDK_BACKEND:-x11}"
+    # Sistema de ventanas. Sin VESK_GDK_BACKEND se detecta la sesion: Wayland
+    # nativo si WAYLAND_DISPLAY esta definido, X11/XWayland en caso contrario.
+    # VESK_GDK_BACKEND=x11 fuerza XWayland; =wayland fuerza Wayland nativo.
+    if [ -n "''${VESK_GDK_BACKEND:-}" ]; then
+      export GDK_BACKEND="$VESK_GDK_BACKEND"
+    fi
 
     # Solo afecta al backend wry (WebKitGTK); inerte con CEF.
     export WEBKIT_DISABLE_DMABUF_RENDERER=1

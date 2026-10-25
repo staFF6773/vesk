@@ -29,6 +29,20 @@ Vesk fija ambas variables al arrancar, antes de crear la ventana, asi que tambie
 lanzado desde `.desktop`. En el shell de Nix, `VESK_GDK_BACKEND=x11` fuerza XWayland (lento
 pero estable si tu compositor falla).
 
+### Backend de ventanas
+
+El backend CEF tambien elige el sistema de ventanas al arrancar:
+
+- **Wayland nativo** si la sesion lo ofrece (`WAYLAND_DISPLAY` definido o
+  `XDG_SESSION_TYPE=wayland`). CEF crea su propia ventana de nivel superior (CEF Views) y
+  GTK usa Wayland para la bandeja, sin pasar por XWayland.
+- **X11/XWayland** en cualquier otro caso.
+
+`VESK_GDK_BACKEND=wayland` o `=x11` fuerza uno de los dos. En Wayland nativo el protocolo
+no expone posicion global de ventana: `set_size`/`set_position` son no-ops y el estado de
+ventana que guarda `tauri-plugin-window-state` no es fiable. Mostrar/ocultar, foco,
+maximizar y pantalla completa si funcionan.
+
 ### GSettings en NixOS
 
 GTK y WebKit sacan tema, fuentes, escalado y preferencias de GSettings. Si el perfil no tiene

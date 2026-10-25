@@ -8,9 +8,50 @@ use tauri_runtime_cef::{
 
 const DISCORD_HOSTS: &[&str] = &["discord.com", "discordapp.com", "discord.gg"];
 
+/// Sistema de ventanas con el que CEF crea la ventana de nivel superior.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Windowing {
+    X11,
+    Wayland,
+}
+
+/// VESK_GDK_BACKEND fuerza un backend concreto ("wayland" o "x11"). Sin valor
+/// se usa Wayland nativo si la sesion lo ofrece y X11 en caso contrario: en
+/// Wayland, CEF crea su propia ventana (CEF Views) y no pasa por XWayland.
+fn windowing() -> Windowing {
+    match std::env::var("VESK_GDK_BACKEND") {
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "wayland" => Windowing::Wayland,
+            "x11" | "xwayland" => Windowing::X11,
+            _ => detect_windowing(),
+        },
+        Err(_) => detect_windowing(),
+    }
+}
+
+fn detect_windowing() -> Windowing {
+    let wayland_session = std::env::var_os("WAYLAND_DISPLAY").is_some()
+        || std::env::var("XDG_SESSION_TYPE")
+            .map(|value| value.eq_ignore_ascii_case("wayland"))
+            .unwrap_or(false);
+
+    if wayland_session {
+        Windowing::Wayland
+    } else {
+        Windowing::X11
+    }
+}
+
+pub fn native_wayland() -> bool {
+    windowing() == Windowing::Wayland
+}
+
 pub fn configure_env() {
-    let backend = std::env::var("VESK_GDK_BACKEND").unwrap_or_else(|_| "x11".to_owned());
-    std::env::set_var("GDK_BACKEND", backend);
+    // GTK (bandeja del sistema) tiene que hablar el mismo protocolo que CEF.
+    std::env::set_var(
+        "GDK_BACKEND",
+        if native_wayland() { "wayland" } else { "x11" },
+    );
 
     if std::env::var_os("__NV_DISABLE_EXPLICIT_SYNC").is_none() {
         std::env::set_var("__NV_DISABLE_EXPLICIT_SYNC", "1");
@@ -28,7 +69,11 @@ pub fn configure() {
         identifier: "dev.vencord.vesk".into(),
         custom_schemes: vec!["tauri".into(), "ipc".into(), "asset".into()],
         command_line_args: command_line_args(),
-        linux_windowing: LinuxWindowing::X11,
+        linux_windowing: if native_wayland() {
+            LinuxWindowing::Wayland
+        } else {
+            LinuxWindowing::X11
+        },
         ..Default::default()
     });
 }

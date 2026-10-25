@@ -61,6 +61,21 @@ Vesk aplica en el contenedor lo que OpenAsar hace en el proceso principal de Ele
 - **Optimizador de DOM**: retrasa 100 ms el `removeChild` de los nodos de actividad de la
   lista de miembros, que React reescribe constantemente. `VESK_DOM_OPTIMIZER=0` lo
   desactiva.
+- **Reposo real**: al ocultarse, `Webview::hide()` avisa a CEF (`was_hidden`) y ya no
+  se desactiva `IntensiveWakeUpThrottling` ni el throttling de timers, asi que Chromium
+  deja de componer y estrangula a Discord. Medido en este equipo con `/proc`:
+  - ventana oculta: **4-5%** de un nucleo (antes 32-45%), con 9 procesos vivos;
+  - ventana visible en reposo: **5-10%**;
+  - al volver de la bandeja se recuperan los 60 fps (probado por CDP con
+    `requestAnimationFrame`), no queda la pagina congelada.
+  Al cerrar con la X el ocultado se difiere a un hilo: dentro del callback de
+  `CloseRequested` la ventana se queda mapeada y el hilo principal gira.
+- **Memoria**: el PSS ronda **1.0 GB** y casi todo es de Discord: renderer ~470 MB,
+  navegador ~220 MB, proceso GPU ~120 MB, servicio de red ~110 MB, audio ~40 MB y los
+  zygotes ~85 MB. Probado y descartado por no mover la aguja o empeorar la fluidez:
+  `enable-low-end-device-mode`, tope de cache en disco, desactivar Vencord, audio en el
+  proceso del navegador, `HeapProfiler.collectGarbage` al ocultar (recupera 13 MB) y el
+  preset de GPU `0` (ahorra 13 MB pero sube el reposo de 5% a 15% de CPU).
 - **Latencia de audio**: `PULSE_LATENCY_MSEC=30` para la voz.
 - **Splash ligero**: el arte embebido en el script de inyeccion pasa de 121 KB a 30 KB en
   base64 (copia de 256x256 en `assets/splash.jpg`).
@@ -78,7 +93,8 @@ Vesk aplica en el contenedor lo que OpenAsar hace en el proceso principal de Ele
   y limitaciones. Sin pestanas de plugins, temas, Cloud ni Backup (el bundle se parchea al inyectar;
   si Vencord cambia el literal, se avisa por stderr y se usan los ajustes originales).
 - Bandeja del sistema: mostrar, recargar, devtools, salir.
-- Cerrar la ventana la oculta en la bandeja (`VESK_CLOSE_TO_TRAY=0` lo desactiva).
+- Cerrar la ventana la oculta en la bandeja (`VESK_CLOSE_TO_TRAY=0` lo desactiva). La
+  webview se marca oculta para CEF antes de desmapear la ventana.
 - Instancia unica y enlaces `discord://` (tambien al arrancar con un argumento).
 - Enlaces externos se abren en el navegador del sistema.
 - Persistencia de tamano/posicion de ventana.

@@ -167,6 +167,22 @@ fn main() {
 
             let window = create_main_window(app, &initial, Some(&vault))?;
             install_close_to_tray(&window);
+            if let Ok(raw) = std::env::var("VESK_TRAY_CYCLE") {
+                let delay: u64 = raw.parse().unwrap_or(15000);
+                let hold: u64 = std::env::var("VESK_TRAY_HOLD")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(6);
+                let win = window.clone();
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(delay));
+                    hide_to_tray(&win);
+                    std::thread::sleep(std::time::Duration::from_secs(hold));
+                    reveal(&handle);
+                    eprintln!("[dbg] mostrada visible={:?}", win.is_visible());
+                });
+            }
             app.manage(vault);
 
             create_tray(app)?;
@@ -736,9 +752,21 @@ fn navigate_deep_link(app: &AppHandle, raw: &str) {
     }
 }
 
+fn hide_to_tray(window: &WebviewWindow) {
+    // Avisa a CEF antes de desmapear: la pagina pasa a oculta y Chromium deja
+    // de componer y de correr los timers de Discord a ritmo normal.
+    let _ = AsRef::<tauri::Webview<BrowserEngine>>::as_ref(window).hide();
+    let _ = window.hide();
+}
+
+fn show_from_tray(window: &WebviewWindow) {
+    let _ = window.show();
+    let _ = AsRef::<tauri::Webview<BrowserEngine>>::as_ref(window).show();
+}
+
 fn reveal(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
+        show_from_tray(&window);
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
@@ -757,7 +785,13 @@ fn install_close_to_tray(window: &WebviewWindow) {
         }
 
         api.prevent_close();
-        let _ = win.hide();
+
+        // Ocultar desde dentro del callback de cierre no surte efecto con este
+        // runtime: la ventana se queda mapeada y el hilo principal empieza a
+        // girar. Lo diferimos a un hilo, que despacha el mensaje ya fuera del
+        // evento.
+        let win = win.clone();
+        std::thread::spawn(move || hide_to_tray(&win));
 
         if !TRAY_HINTED.swap(true, Ordering::Relaxed) {
             eprintln!("[vesk] ventana oculta en la bandeja del sistema");

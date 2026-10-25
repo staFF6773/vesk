@@ -67,8 +67,12 @@ fn gpu_preset() -> GpuPreset {
 fn command_line_args() -> Vec<(String, Option<String>)> {
     // El runtime fusiona disable-features/enable-features con las que ya fija
     // CEF, asi que basta con una entrada por switch.
+    // Sin IntensiveWakeUpThrottling en la lista: cuando la ventana se oculta
+    // en la bandeja, Chromium debe poder estrangular los timers de Discord.
+    // El runtime ya avisa a CEF con was_hidden(), asi que el aviso llega; lo
+    // unico que lo anulaba era desactivar el throttling.
     let mut disabled = String::from(
-        "SpareRendererForSitePerProcess,IntensiveWakeUpThrottling,\
+        "SpareRendererForSitePerProcess,\
          AllowAggressiveThrottlingWithWebSocket,UseEcoQoSForBackgroundProcess,\
          LocalNetworkAccessChecks,LocalNetworkAccessChecksWebSocket,\
          LocalNetworkAccessChecksWebRTC",
@@ -78,7 +82,6 @@ fn command_line_args() -> Vec<(String, Option<String>)> {
     let mut enabled = String::new();
     let mut args = vec![
         ("--disable-gpu-sandbox".into(), None),
-        ("--disable-background-timer-throttling".into(), None),
         ("--no-first-run".into(), None),
         ("--no-default-browser-check".into(), None),
         (

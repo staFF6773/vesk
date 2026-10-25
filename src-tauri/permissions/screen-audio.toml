@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-screen-audio"
+description = "Permite cambiar y consultar el modo de audio al compartir pantalla."
+commands.allow = ["screen_audio_set", "screen_audio_list"]

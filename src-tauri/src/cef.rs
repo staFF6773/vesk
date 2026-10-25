@@ -2,8 +2,7 @@ use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 
 use tauri_runtime_cef::{
-    CefConfig, DenyReason, LinuxWindowing, NormalizedOrigin, PermissionKind,
-    DEFAULT_PROMPT_TIMEOUT,
+    CefConfig, DenyReason, LinuxWindowing, NormalizedOrigin, PermissionKind, DEFAULT_PROMPT_TIMEOUT,
 };
 
 const DISCORD_HOSTS: &[&str] = &["discord.com", "discordapp.com", "discord.gg"];
@@ -124,7 +123,9 @@ fn command_line_args() -> Vec<(String, Option<String>)> {
     )
     .replace(' ', "");
 
-    let mut enabled = String::new();
+    // El audio del sistema al compartir pantalla lo gestiona el modulo
+    // screen_audio (fuente virtual de PipeWire), no el feature de Chromium.
+    let mut enabled: Vec<String> = Vec::new();
     let mut args = vec![
         ("--disable-gpu-sandbox".into(), None),
         ("--no-first-run".into(), None),
@@ -140,10 +141,10 @@ fn command_line_args() -> Vec<(String, Option<String>)> {
         GpuPreset::Off => {}
         GpuPreset::Safe => {
             args.push(("--enable-gpu-rasterization".into(), None));
-            enabled.push_str(
-                "ThrottleDisplayNoneAndVisibilityHiddenCrossOriginIframes,\
-                 WebAssemblyLazyCompilation",
-            );
+            enabled.extend([
+                "ThrottleDisplayNoneAndVisibilityHiddenCrossOriginIframes".to_owned(),
+                "WebAssemblyLazyCompilation".to_owned(),
+            ]);
         }
         GpuPreset::Full => {
             args.extend([
@@ -155,23 +156,28 @@ fn command_line_args() -> Vec<(String, Option<String>)> {
                     Some("single-fullscreen,single-on-top,underlay".into()),
                 ),
             ]);
-            enabled.push_str(
-                "EnableDrDc,CanvasOopRasterization,\
-                 ThrottleDisplayNoneAndVisibilityHiddenCrossOriginIframes,\
-                 WebAssemblyLazyCompilation",
-            );
+            enabled.extend([
+                "EnableDrDc".to_owned(),
+                "CanvasOopRasterization".to_owned(),
+                "ThrottleDisplayNoneAndVisibilityHiddenCrossOriginIframes".to_owned(),
+                "WebAssemblyLazyCompilation".to_owned(),
+            ]);
             disabled.push_str(",Vulkan");
         }
     }
 
     if !enabled.is_empty() {
-        args.push(("enable-features".into(), Some(enabled.replace(' ', ""))));
+        args.push(("enable-features".into(), Some(enabled.join(","))));
     }
 
     args.push(("disable-features".into(), Some(disabled)));
 
     if let Ok(extra) = std::env::var("VESK_CEF_ARGS") {
-        for arg in extra.split(',').map(str::trim).filter(|arg| !arg.is_empty()) {
+        for arg in extra
+            .split(',')
+            .map(str::trim)
+            .filter(|arg| !arg.is_empty())
+        {
             match arg.split_once('=') {
                 Some((key, value)) => {
                     args.push((normalize_switch(key), Some(value.to_owned())));
@@ -237,9 +243,7 @@ pub fn install_permission_policy() {
         prompt(message, tx);
 
         std::thread::spawn(move || {
-            let allowed = rx
-                .recv_timeout(DEFAULT_PROMPT_TIMEOUT)
-                .unwrap_or(false);
+            let allowed = rx.recv_timeout(DEFAULT_PROMPT_TIMEOUT).unwrap_or(false);
 
             if allowed {
                 let mut cache = granted.lock().expect("cef permission cache");
@@ -256,10 +260,7 @@ pub fn install_permission_policy() {
     tauri_runtime_cef::set_permission_audit(|event| {
         eprintln!(
             "[vesk] permiso {} en {}: concedido={} tipos={:?}",
-            event.request_id,
-            event.raw_origin,
-            event.granted,
-            event.kinds
+            event.request_id, event.raw_origin, event.granted, event.kinds
         );
     });
 }
@@ -331,9 +332,7 @@ fn prompt_message(kinds: &[PermissionKind]) -> String {
 fn prompt(message: String, tx: std::sync::mpsc::Sender<bool>) {
     use gtk::glib;
     use gtk::prelude::*;
-    use gtk::{
-        ButtonsType, DialogFlags, MessageDialog, MessageType, ResponseType, WindowPosition,
-    };
+    use gtk::{ButtonsType, DialogFlags, MessageDialog, MessageType, ResponseType, WindowPosition};
 
     glib::idle_add_once(move || {
         let dialog = MessageDialog::new(
@@ -404,6 +403,7 @@ mod tests {
             assert!(has(&full, flag), "falta {flag}");
         }
         assert!(arg(&full, "enable-features").contains("EnableDrDc"));
+        assert!(!arg(&full, "enable-features").contains("PulseaudioLoopbackForScreenShare"));
         assert!(arg(&full, "disable-features").contains("Vulkan"));
 
         // Conservador: nada que pida GpuMemoryBuffer (el crash con NVIDIA).
@@ -412,6 +412,7 @@ mod tests {
         assert!(!has(&safe, "--enable-zero-copy"));
         assert!(!has(&safe, "--ignore-gpu-blocklist"));
         assert!(!arg(&safe, "enable-features").contains("EnableDrDc"));
+        assert!(!arg(&safe, "enable-features").contains("PulseaudioLoopbackForScreenShare"));
         assert!(!arg(&safe, "disable-features").contains("Vulkan"));
 
         // Apagado: solo los flags de siempre.

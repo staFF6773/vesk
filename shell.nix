@@ -88,7 +88,7 @@ let
   ] ++ cefRuntimeLibs;
 in
 pkgs.mkShell {
-  buildInputs = with pkgs; [ cargo rustc rustfmt clippy pkg-config ] ++ runtimeLibs;
+  buildInputs = with pkgs; [ cargo rustc rustfmt clippy pkg-config clang glibc.dev ] ++ runtimeLibs;
 
   shellHook = ''
     export CEF_PATH="${cefFlat}"
@@ -109,6 +109,16 @@ pkgs.mkShell {
 
     # Solo afecta al backend wry (WebKitGTK); inerte con CEF.
     export WEBKIT_DISABLE_DMABUF_RENDERER=1
+
+    # El crate pipewire usa bindgen, que necesita libclang y los headers de
+    # glibc/gcc para generar los bindings de libpipewire y libspa.
+    # La libreria libclang esta en el output "lib" de llvmPackages.libclang
+    # (el paquete clang wrapper NO la expone en ${pkgs.clang}/lib).
+    export LIBCLANG_PATH="${pkgs.llvmPackages.libclang.lib}/lib"
+    # El directorio de headers de gcc lleva la version en el path; lo resolvemos
+    # en runtime con un glob porque clang no expande "*" dentro de -I.
+    GCC_INC=$(echo ${pkgs.gcc.cc}/lib/gcc/x86_64-unknown-linux-gnu/*/include)
+    export BINDGEN_EXTRA_CLANG_ARGS="-I${pkgs.glibc.dev}/include -I$GCC_INC"
 
     # cef-dll-sys copia libcef.so y sus recursos a target/<perfil> conservando
     # los permisos de solo lectura del store de Nix. En el siguiente build no

@@ -106,7 +106,14 @@ Vesk aplica en el contenedor lo que OpenAsar hace en el proceso principal de Ele
 - Ajustes reducidos a una seccion **Vesk** informativa: banner con el arte del programa, version
   y limitaciones. Sin pestanas de plugins, temas, Cloud ni Backup (el bundle se parchea al inyectar;
   si Vencord cambia el literal, se avisa por stderr y se usan los ajustes originales).
-- Bandeja del sistema: mostrar, recargar, devtools, salir.
+- Bandeja del sistema: mostrar, recargar, devtools, salir y un submenu de
+  **Audio al compartir pantalla** (Sistema menos Vesk, elegir aplicacion o desactivado).
+- Compartir pantalla con audio por aplicacion: en lugar del loopback de Chromium (que
+  captura **todo** el sistema, incluido el propio cliente de Vesk, y causa eco), Vesk crea
+  una fuente virtual de PipeWire `Vesk Screen Share` y enlaza solo el audio elegido.
+  El cliente de Vesk siempre se excluye. Se elige el modo desde la bandeja; por defecto es
+  **Sistema (menos Vesk)**. Variables: `VESK_SCREEN_AUDIO=0` desactiva el parche,
+  `VESK_SCREEN_AUDIO_APP=nombre` fija el modo a una aplicacion concreta al arrancar.
 - Cerrar la ventana la oculta en la bandeja (`VESK_CLOSE_TO_TRAY=0` lo desactiva). La
   webview se marca oculta para CEF antes de desmapear la ventana.
 - Instancia unica y enlaces `discord://` (tambien al arrancar con un argumento).
@@ -176,21 +183,29 @@ Probado con un token sintetico: se guarda al vuelo y se restaura tras reiniciar.
 
 ## Limitaciones conocidas (importante)
 
-Tauri usa el webview del sistema, no Chromium. En Linux eso significa WebKitGTK:
+El backend por defecto es **CEF** (Chromium embebido). El backend `wry` usa WebKitGTK.
+
+### CEF (por defecto)
+
+- **Compartir pantalla**: funciona con `getDisplayMedia` y el selector del portal en
+  Wayland. El audio se enruta por una fuente virtual de PipeWire (`Vesk Screen Share`)
+  creada por Vesk: se puede enviar el sistema completo (menos el propio cliente, para evitar
+  eco) o solo una aplicacion concreta. Elige el modo en el submenu **Audio al compartir
+  pantalla** de la bandeja. `VESK_SCREEN_AUDIO=0` desactiva el parche.
+- **arrpc**: el Rich Presence de juegos y apps locales no esta implementado.
+- **Krisp / codecs propietarios**: no disponibles.
+- **Notificaciones**: dependen del portal del escritorio; no hay integracion nativa aun.
+- Algunos flujos de Discord (pagos, passkeys, captchas) pueden detectar el entorno.
+
+### wry (WebKitGTK)
 
 - **Voz**: WebRTC de WebKitGTK puede funcionar, pero la cadena de audio de Discord no esta
   probada y `getUserMedia` puede requerir permisos que wry no expone todavia.
-- **Compartir pantalla**: WebKitGTK no implementa `getDisplayMedia` de forma equiparable a
-  Chromium. No funciona.
-- **venmic / arrpc**: los modulos nativos de Vesktop para audio de pantalla y Rich Presence
-  no existen en esta version.
-- **Notificaciones**: dependen del portal del escritorio; no hay integracion nativa aun.
+- **Compartir pantalla**: WebKitGTK no implementa `getDisplayMedia`. No funciona.
+- **venmic / arrpc**: no existen en esta version.
+- **Notificaciones**: dependen del portal del escritorio.
 - **Krisp / codecs propietarios**: no disponibles.
 - Algunos flujos de Discord (pagos, passkeys, captchas) pueden detectar WebKit y fallar.
-
-Para paridad real con Vesktop hace falta un backend **CEF** (Chromium embebido) en lugar del
-webview del sistema. La estructura actual permite anadir ese backend sin tocar la capa de
-inyeccion de Vencord.
 
 ## Estructura
 

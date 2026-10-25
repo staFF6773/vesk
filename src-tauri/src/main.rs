@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 use tauri::{
-    menu::{Menu, MenuItem, PredefinedMenuItem},
+    menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
@@ -12,9 +12,36 @@ use tauri::{
 #[cfg(all(feature = "cef", target_os = "linux"))]
 mod cef;
 
+mod screen_audio;
 mod session;
 
+use screen_audio::{AppInfo, Mode};
 use session::SessionVault;
+
+#[tauri::command]
+fn screen_audio_set(mode: String) -> Result<(), String> {
+    screen_audio::set_mode(parse_mode(&mode)?);
+    Ok(())
+}
+
+#[tauri::command]
+fn screen_audio_list() -> Vec<AppInfo> {
+    screen_audio::list_apps()
+}
+
+fn parse_mode(value: &str) -> Result<Mode, String> {
+    match value {
+        "off" => Ok(Mode::Off),
+        "system" => Ok(Mode::System),
+        other => {
+            let app = other.strip_prefix("app:").unwrap_or(other);
+            if app.is_empty() {
+                return Err("modo de audio invalido".to_owned());
+            }
+            Ok(Mode::App(app.to_owned()))
+        }
+    }
+}
 
 #[cfg(all(feature = "cef", target_os = "linux"))]
 type BrowserEngine = tauri_runtime_cef::CefRuntime<tauri::EventLoopMessage>;
@@ -140,6 +167,7 @@ fn main() {
     configure_webkit_env();
 
     tauri::Builder::<BrowserEngine>::new()
+        .invoke_handler(tauri::generate_handler![screen_audio_set, screen_audio_list])
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             if let Some(link) = argv.iter().find(|arg| arg.starts_with("discord://")) {
                 navigate_deep_link(app, link);
@@ -180,16 +208,18 @@ fn main() {
                     hide_to_tray(&win);
                     std::thread::sleep(std::time::Duration::from_secs(hold));
                     reveal(&handle);
-                    eprintln!("[dbg] mostrada visible={:?}", win.is_visible());
                 });
             }
             app.manage(vault);
 
+            screen_audio::init();
             create_tray(app)?;
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("no se pudo iniciar Vesk");
+
+    screen_audio::shutdown();
 }
 
 fn create_main_window(
@@ -295,6 +325,64 @@ fn injection_script(vault: Option<&SessionVault>) -> String {
         });
 
       return { abort: () => controller.abort() };
+    };
+  }
+
+  // --- Audio del sistema por aplicacion al compartir pantalla ---
+  // Vesk crea una fuente virtual de PipeWire ("Vesk Screen Share") y enlaza solo
+  // el audio elegido, excluyendo siempre el propio cliente para evitar eco.
+  // Aqui redirigimos getDisplayMedia a ese microfono virtual.
+  if (navigator.mediaDevices && typeof navigator.mediaDevices.getDisplayMedia === "function") {
+    const media = navigator.mediaDevices;
+    const originalDisplay = media.getDisplayMedia.bind(media);
+    const VIRTUAL_LABEL = "Vesk Screen Share";
+
+    const findVirtual = async () => {
+      const devices = await media.enumerateDevices();
+      const found = devices.find((d) => d.kind === "audioinput" && d.label === VIRTUAL_LABEL);
+      if (found) return found.deviceId;
+      // Sin permiso aun, los labels estan vacios: pedir microfono para poblarlos.
+      try {
+        const probe = await media.getUserMedia({ audio: true });
+        probe.getTracks().forEach((t) => t.stop());
+      } catch (_) {}
+      const again = await media.enumerateDevices();
+      const retry = again.find((d) => d.kind === "audioinput" && d.label === VIRTUAL_LABEL);
+      return retry ? retry.deviceId : null;
+    };
+
+    media.getDisplayMedia = async function (constraints) {
+      const next = constraints && typeof constraints === "object" ? { ...constraints } : {};
+      if (next.video === undefined) next.video = true;
+
+      const deviceId = await findVirtual();
+      if (!deviceId) {
+        // No hay fuente virtual (audio desactivado o sin PipeWire): solo video.
+        delete next.audio;
+        return originalDisplay(next);
+      }
+
+      next.audio = {
+        ...(next.audio && typeof next.audio === "object" ? next.audio : {}),
+        deviceId: { exact: deviceId },
+        autoGainControl: false,
+        echoCancellation: false,
+        noiseSuppression: false,
+        channelCount: 2,
+        sampleRate: 48000,
+      };
+
+      try {
+        return await originalDisplay(next);
+      } catch (error) {
+        // Sin servidor de audio el nodo virtual no existe: compartir solo video.
+        if (error && (error.name === "NotSupportedError" || error.name === "OverconstrainedError")) {
+          const fallback = { ...next };
+          delete fallback.audio;
+          return originalDisplay(fallback);
+        }
+        throw error;
+      }
     };
   }
 
@@ -510,6 +598,7 @@ fn injection_script(vault: Option<&SessionVault>) -> String {
         "Cliente web de Discord y enlaces discord://",
         "Vencord inyectado al inicio del documento",
         "Voz y video con WebRTC de Chromium (CEF)",
+        "Compartir pantalla con el audio del sistema (PipeWire)",
         "Bandeja del sistema: mostrar, recargar, cerrar sesion, salir",
         windowing === "wayland"
           ? "Sesion persistente; el compositor decide tamano y posicion"
@@ -523,7 +612,8 @@ fn injection_script(vault: Option<&SessionVault>) -> String {
         "Enlaces externos en el navegador del sistema",
       ]),
       group("Limitaciones conocidas", engine === "cef" ? [
-        "Compartir pantalla con audio del sistema requiere venmic/PipeWire (pendiente)",
+        "Al compartir pantalla se envia el audio de todo el sistema, no por aplicacion",
+        "VESK_SCREEN_AUDIO=0 desactiva el audio al compartir pantalla",
         "Sin arrpc, Krisp ni codecs propietarios",
         "Notificaciones dependen del portal del escritorio",
         windowing === "wayland"
@@ -829,11 +919,21 @@ fn create_tray(app: &App) -> tauri::Result<()> {
         true,
         None::<&str>,
     )?;
+    let audio_system = MenuItem::with_id(app, "audio-system", "Sistema (menos Vesk)", true, None::<&str>)?;
+    let audio_pick = MenuItem::with_id(app, "audio-pick", "Elegir aplicacion…", true, None::<&str>)?;
+    let audio_off = MenuItem::with_id(app, "audio-off", "Desactivado", true, None::<&str>)?;
+    let audio_menu = Submenu::with_id(
+        app,
+        "audio",
+        "Audio al compartir",
+        true,
+    )?;
+    audio_menu.append_items(&[&audio_system, &audio_pick, &audio_off])?;
     let separator = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "Salir", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
-        &[&show, &reload, &logout, &devtools, &separator, &quit],
+        &[&show, &reload, &logout, &devtools, &audio_menu, &separator, &quit],
     )?;
 
     let mut builder = TrayIconBuilder::with_id("vesk-tray")
@@ -866,6 +966,9 @@ fn create_tray(app: &App) -> tauri::Result<()> {
                 }
                 app.exit(0);
             }
+            "audio-system" => screen_audio::set_mode(Mode::System),
+            "audio-off" => screen_audio::set_mode(Mode::Off),
+            "audio-pick" => open_audio_picker(app),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -885,6 +988,88 @@ fn create_tray(app: &App) -> tauri::Result<()> {
 
     builder.build(app)?;
     Ok(())
+}
+
+/// Abre (o enfoca) la ventana emergente para elegir que aplicacion comparte audio.
+fn open_audio_picker(app: &AppHandle) {
+    if let Some(existing) = app.get_webview_window("audio-picker") {
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return;
+    }
+
+    let html = picker_html();
+    let path = app
+        .path()
+        .app_local_data_dir()
+        .map(|dir| {
+            let _ = std::fs::create_dir_all(&dir);
+            dir.join("audio-picker.html")
+        })
+        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp/vesk-audio-picker.html"));
+
+    if std::fs::write(&path, html).is_err() {
+        return;
+    }
+
+    let url = format!("file://{}", path.display());
+    let parsed = url::Url::parse(&url).unwrap_or_else(|_| url::Url::parse("file:///tmp/vesk-audio-picker.html").unwrap());
+    let _ = WebviewWindowBuilder::new(app, "audio-picker", WebviewUrl::External(parsed))
+        .title("Audio al compartir - Vesk")
+        .inner_size(360.0, 440.0)
+        .build();
+}
+
+/// HTML de la ventana de seleccion de audio. La lista de apps se incrusta en el
+/// momento de abrir, asi que refleja el estado actual de PipeWire.
+fn picker_html() -> String {
+    let mut buttons = String::new();
+    for app in screen_audio::list_apps() {
+        let name = escape_html(&app.name);
+        buttons.push_str(&format!(
+            "<button class=\"app\" onclick=\"pick('app:{name}')\">{name}</button>\n",
+            name = name
+        ));
+    }
+
+    format!(
+        r#"<!doctype html><html lang="es"><head><meta charset="utf-8">
+<style>
+  body {{ font-family: sans-serif; margin: 0; padding: 14px; color: #e6e6e6; background: #1e1f22; }}
+  h3 {{ margin: 0 0 10px; font-size: 15px; }}
+  button {{ display: block; width: 100%; text-align: left; margin: 4px 0; padding: 8px 10px;
+    border: 0; border-radius: 6px; background: #2b2d31; color: #e6e6e6; cursor: pointer; font-size: 13px; }}
+  button:hover {{ background: #3a3c42; }}
+  .global {{ background: #5865f2; }}
+  .global:hover {{ background: #4752c4; }}
+  hr {{ border: 0; border-top: 1px solid #3a3c42; margin: 10px 0; }}
+  p {{ color: #9aa0a6; font-size: 12px; margin: 6px 0; }}
+</style></head><body>
+  <h3>Audio al compartir pantalla</h3>
+  <button class="global" onclick="pick('system')">Sistema (menos Vesk)</button>
+  <button class="global" onclick="pick('off')">Desactivado</button>
+  <hr>
+  <p>Aplicaciones (excluye Vesk para evitar eco):</p>
+  {buttons}
+  <script>
+    function pick(mode) {{
+      window.__TAURI_INTERNALS__.invoke("screen_audio_set", {{ mode: mode }})
+        .then(function () {{ window.close(); }})
+        .catch(function (e) {{ console.error(e); }});
+    }}
+  </script>
+</body></html>"#
+    , buttons = buttons
+    )
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("\"", "&quot;")
+        .replace("'", "&#39;")
 }
 
 #[cfg(test)]
@@ -985,3 +1170,4 @@ mod tests {
         assert!(!is_discord_url("no es una url"));
     }
 }
+

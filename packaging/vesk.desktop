@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Vesk
+Comment=Cliente de Discord nativo en Rust
+Exec=vesk %u
+Terminal=false
+Type=Application
+Icon=vesk
+Categories=Network;InstantMessaging;
+MimeType=x-scheme-handler/discord;

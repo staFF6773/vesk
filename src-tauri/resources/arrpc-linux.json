@@ -1,0 +1,37 @@
+[
+  {
+    "id": "358421669603311616",
+    "name": "Hearts of Iron IV",
+    "executables": [{ "name": "hoi4", "os": "linux" }]
+  },
+  {
+    "id": "358422126602223616",
+    "name": "Factorio",
+    "executables": [{ "name": "factorio", "os": "linux" }]
+  },
+  {
+    "id": "487330866830376960",
+    "name": "Throne of Lies",
+    "executables": [{ "name": "throneoflies.x86", "os": "linux" }]
+  },
+  {
+    "id": "505520072870199335",
+    "name": "VA-11 HALL-A",
+    "executables": [{ "name": "va-11 hall-a/runner\"", "os": "linux" }]
+  },
+  {
+    "id": "1402416952713941106",
+    "name": "Counter-Strike: Global Offensive",
+    "executables": [{ "name": "csgo_linux64", "os": "linux" }]
+  },
+  {
+    "id": "1402417052379254804",
+    "name": "Move or Die",
+    "executables": [{ "name": "move or die/love/linux32/love", "os": "linux" }]
+  },
+  {
+    "id": "1402418344912752671",
+    "name": "Terraria",
+    "executables": [{ "name": "terraria.bin.x86", "os": "linux" }]
+  }
+]

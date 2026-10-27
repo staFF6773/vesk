@@ -17,7 +17,8 @@ inyecta [Vencord](https://github.com/Vendicated/Vencord) al inicio del documento
 Verificado en NixOS (Hyprland, Wayland nativo y XWayland): compila con Tauri 2.12.5 y
 WebKitGTK 2.54.1, carga la pantalla de login de Discord y Vencord queda inyectado
 (`window.Vencord` es un objeto y el bundle aplica sus estilos). `cargo test` cubre la
-traduccion de `discord://`, el filtro de navegacion, el arte embebido y los flags de CEF.
+traduccion de `discord://`, el filtro de navegacion, el arte embebido, los flags de CEF y
+el protocolo IPC/bridge de Rich Presence.
 
 ## Rendimiento (leer antes de tocar el entorno)
 
@@ -122,10 +123,14 @@ Vesk aplica en el contenedor lo que OpenAsar hace en el proceso principal de Ele
   cuando Discord ya renderizo la app.
 - Inyeccion de Vencord (build *userscript*) en el mundo principal, antes de que arranque Discord.
 - Shim de `unsafeWindow` y `GM_xmlhttpRequest` para que el userscript corra sin gestor.
+- **Rich Presence (arRPC)**: los juegos que hablan con el IPC local de Discord aparecen en el
+  perfil, sin Node ni un servidor externo. Incluye un bridge WebSocket en `127.0.0.1:1337`
+  para el plugin `WebRichPresence (arRPC)` de Vencord y escaneo de procesos Linux.
 - Ajustes reducidos a una seccion **Vesk** informativa: banner con el arte del programa, version
   y limitaciones. Sin pestanas de plugins, temas, Cloud ni Backup (el bundle se parchea al inyectar;
   si Vencord cambia el literal, se avisa por stderr y se usan los ajustes originales).
-- Bandeja del sistema: mostrar, recargar, devtools, salir y un submenu de
+- Bandeja del sistema: mostrar, recargar, devtools, salir, un submenu de
+  **Rich Presence** (activar o desactivar la actividad de juegos) y otro de
   **Audio al compartir pantalla** (Sistema menos Vesk, elegir aplicacion o desactivado).
 - Compartir pantalla con audio por aplicacion: en lugar del loopback de Chromium (que
   captura **todo** el sistema, incluido el propio cliente de Vesk, y causa eco), Vesk crea
@@ -140,9 +145,29 @@ Vesk aplica en el contenedor lo que OpenAsar hace en el proceso principal de Ele
 - Persistencia de tamano/posicion de ventana.
 - Sesion persistente: copia del token en `session.token` y restauracion al arrancar.
 
+## Rich Presence (arRPC)
+
+Vesk implementa el servidor local de arRPC en Rust. No necesita Node ni ejecutar `npx arrpc`:
+
+- Escucha el socket IPC de Discord (`$XDG_RUNTIME_DIR/discord-ipc-0..9`) para que los juegos
+  con Discord RPC envien su actividad. Si el Discord de escritorio real ya ocupa el socket,
+  Vesk usa el siguiente libre.
+- Expone el bridge WebSocket `ws://127.0.0.1:1337`, que es el que consume el plugin
+  `WebRichPresence (arRPC)` incluido en Vencord. El plugin no se habilita en los ajustes:
+  Vesk llama directamente a su `handleEvent`, como hace Vesktop.
+- Escanea `/proc` cada 5 segundos con una copia recortada de la tabla Linux de
+  [OpenAsar/arRPC](https://github.com/OpenAsar/arRPC) (MIT, commit `3c4e1ce`). Esa tabla
+  solo incluye unos pocos juegos Linux; la mayoria se detecta por IPC.
+- Se activa al arrancar. Se puede apagar desde **Rich Presence → Actividad de juegos** en la
+  bandeja o con `VESK_ARRPC=0`. `VESK_ARRPC_SCAN=0` desactiva solo el escaneo de procesos.
+- Si el puerto `1337` ya esta ocupado por otro arRPC, Vesk no levanta un servidor duplicado
+  y deja que el cliente use la instancia externa.
+- Las invitaciones y deep links de arRPC no se reenvian; Vesk ya gestiona los enlaces
+  `discord://` por separado.
+
 ## Requisitos
 
-- Rust 1.82+
+- Rust 1.88+ (edicion 2021; el workspace fija `rust-version`)
 - Linux: GTK3, WebKitGTK 4.1, libsoup3, libayatana-appindicator, GStreamer.
 - En NixOS, usa el shell incluido.
 
@@ -211,7 +236,6 @@ El backend por defecto es **CEF** (Chromium embebido). El backend `wry` usa WebK
   creada por Vesk: se puede enviar el sistema completo (menos el propio cliente, para evitar
   eco) o solo una aplicacion concreta. Elige el modo en el submenu **Audio al compartir
   pantalla** de la bandeja. `VESK_SCREEN_AUDIO=0` desactiva el parche.
-- **arrpc**: el Rich Presence de juegos y apps locales no esta implementado.
 - **Krisp**: no disponible. H.264 y AAC si estan incluidos en el CEF de Arch.
 - **Notificaciones**: dependen del portal del escritorio; no hay integracion nativa aun.
 - Algunos flujos de Discord (pagos, passkeys, captchas) pueden detectar el entorno.
@@ -221,7 +245,7 @@ El backend por defecto es **CEF** (Chromium embebido). El backend `wry` usa WebK
 - **Voz**: WebRTC de WebKitGTK puede funcionar, pero la cadena de audio de Discord no esta
   probada y `getUserMedia` puede requerir permisos que wry no expone todavia.
 - **Compartir pantalla**: WebKitGTK no implementa `getDisplayMedia`. No funciona.
-- **venmic / arrpc**: no existen en esta version.
+- **venmic**: no existe en esta version.
 - **Notificaciones**: dependen del portal del escritorio.
 - **Krisp / codecs propietarios**: no disponibles.
 - Algunos flujos de Discord (pagos, passkeys, captchas) pueden detectar WebKit y fallar.
@@ -235,7 +259,10 @@ src-tauri/
   tauri.conf.json
   capabilities/default.json
   src/main.rs               ventana, bandeja, deep links, inyeccion
+  src/arrpc.rs              IPC de Discord, bridge WebSocket y escaneo
   src/session.rs            vault del token de sesion
+  resources/arrpc-linux.json tabla Linux de arRPC (MIT)
+  resources/arrpc-linux.LICENSE licencia de esa tabla
   resources/vencord.js      bundle de Vencord (GPL-3.0)
 ui/index.html               fallback local (no se usa para Discord)
 assets/icon-source.jpeg     imagen original del icono
@@ -248,4 +275,5 @@ shell.nix / flake.nix
 ## Licencia
 
 GPL-3.0-or-later, igual que Vesktop y Vencord. El bundle de Vencord conserva su licencia y su
-aviso legal en `src-tauri/resources/vencord.js.LEGAL.txt`.
+aviso legal en `src-tauri/resources/vencord.js.LEGAL.txt`. La tabla Linux de arRPC derivada de
+OpenAsar/arRPC mantiene su licencia MIT en `src-tauri/resources/arrpc-linux.LICENSE`.

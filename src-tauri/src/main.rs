@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 use tauri::{
-    menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
@@ -12,6 +12,7 @@ use tauri::{
 #[cfg(all(feature = "cef", target_os = "linux"))]
 mod cef;
 
+mod arrpc;
 mod screen_audio;
 mod session;
 
@@ -196,6 +197,7 @@ fn main() {
             #[cfg(not(all(feature = "cef", target_os = "linux")))]
             vault.watch();
 
+            arrpc::init();
             let window = create_main_window(app, &initial, Some(&vault))?;
             install_close_to_tray(&window);
             if let Ok(raw) = std::env::var("VESK_TRAY_CYCLE") {
@@ -223,6 +225,7 @@ fn main() {
         .expect("no se pudo iniciar Vesk");
 
     screen_audio::shutdown();
+    arrpc::shutdown();
 }
 
 fn create_main_window(
@@ -634,6 +637,7 @@ fn injection_script(vault: Option<&SessionVault>) -> String {
     version: "__VESK_VERSION__",
     art: "__VESK_ICON__",
     repo: "__VESK_REPO__",
+    arrpc: __VESK_ARRPC__,
   };
 
   console.log(
@@ -643,6 +647,124 @@ fn injection_script(vault: Option<&SessionVault>) -> String {
     " getUserMedia=" + typeof (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) +
     " getDisplayMedia=" + typeof (navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia)
   );
+
+  // --- Rich Presence (arRPC) ---
+  // El servidor de Rust escucha en 127.0.0.1:1337 y el plugin de Vencord
+  // convierte cada mensaje en LOCAL_ACTIVITY_UPDATE. No habilitamos el plugin:
+  // llamamos a handleEvent directamente para no tocar sus ajustes ni mostrar
+  // el aviso de "conectado".
+  (() => {
+    if (!window.__VESK__) return;
+
+    const PLUGIN = "WebRichPresence (arRPC)";
+    let socket = null;
+    let enabled = !!window.__VESK__.arrpc;
+    let retry = null;
+    let waiting = null;
+    let warned = false;
+
+    const plugin = () => {
+      const vencord = window.Vencord;
+      return (
+        vencord &&
+        vencord.Plugins &&
+        vencord.Plugins.plugins &&
+        vencord.Plugins.plugins[PLUGIN]
+      );
+    };
+
+    const schedule = () => {
+      if (!enabled || retry || socket) return;
+      retry = setTimeout(() => {
+        retry = null;
+        connect();
+      }, 3000);
+    };
+
+    const waitForPlugin = () => {
+      if (!enabled || waiting) return;
+      waiting = setInterval(() => {
+        if (!enabled || !plugin()) return;
+        clearInterval(waiting);
+        waiting = null;
+        connect();
+      }, 250);
+    };
+
+    const connect = () => {
+      if (!enabled || socket) return;
+
+      const arRPC = plugin();
+      if (!arRPC || typeof arRPC.handleEvent !== "function") {
+        if (!warned) {
+          warned = true;
+          console.warn("[vesk] el plugin WebRichPresence (arRPC) no esta disponible");
+        }
+        schedule();
+        return;
+      }
+
+      try {
+        socket = new WebSocket("ws://127.0.0.1:1337");
+      } catch (error) {
+        schedule();
+        return;
+      }
+
+      socket.onmessage = (event) => {
+        try {
+          arRPC.handleEvent(event);
+        } catch (error) {
+          console.error("[vesk] no se pudo aplicar la actividad Rich Presence", error);
+        }
+      };
+      socket.onclose = () => {
+        socket = null;
+        schedule();
+      };
+      socket.onerror = () => {
+        try {
+          if (socket) socket.close();
+        } catch (_) {}
+      };
+    };
+
+    window.__VESK_RICH_PRESENCE__ = {
+      setEnabled(value) {
+        enabled = !!value;
+        if (retry) {
+          clearTimeout(retry);
+          retry = null;
+        }
+        if (waiting) {
+          clearInterval(waiting);
+          waiting = null;
+        }
+        if (!enabled && socket) {
+          socket.onmessage = null;
+          socket.onclose = null;
+          socket.onerror = null;
+          try {
+            socket.close();
+          } catch (_) {}
+          socket = null;
+        }
+        if (!enabled) {
+          const arRPC = plugin();
+          if (arRPC && typeof arRPC.handleEvent === "function") {
+            try {
+              arRPC.handleEvent({ data: JSON.stringify({ activity: null }) });
+            } catch (_) {}
+          }
+        }
+        if (enabled) waitForPlugin();
+      },
+    };
+
+    // El bundle de Vencord se evalua despues de este script, y el interruptor
+    // de la bandeja puede activar esto cuando el arranque estaba desactivado.
+    if (enabled) waitForPlugin();
+  })();
 
   // Pagina "Acerca de Vesk" que sustituye a los ajustes de Vencord.
   // React se resuelve al renderizar, cuando Vencord ya expuso su API.
@@ -868,6 +990,7 @@ fn injection_script(vault: Option<&SessionVault>) -> String {
         group("Que funciona", engine === "cef" ? [
           "Cliente web de Discord y enlaces discord://",
           "Vencord inyectado al inicio del documento",
+          "Rich Presence de juegos y apps (arRPC)",
           "Pausa videos y GIFs fuera de pantalla",
           "Reproduce GIFs y videos H.264/AAC",
           "Voz y video con WebRTC de Chromium (CEF)",
@@ -880,6 +1003,7 @@ fn injection_script(vault: Option<&SessionVault>) -> String {
         ] : [
           "Cliente web de Discord y enlaces discord://",
           "Vencord inyectado al inicio del documento",
+          "Rich Presence de juegos y apps (arRPC)",
           "Pausa videos y GIFs fuera de pantalla",
           "Bandeja del sistema: mostrar, recargar, cerrar sesion, salir",
           "Sesion persistente y tamano/posicion de ventana",
@@ -889,7 +1013,7 @@ fn injection_script(vault: Option<&SessionVault>) -> String {
           "Al compartir pantalla se envia el audio de todo el sistema, no por aplicacion",
           "VESK_SCREEN_AUDIO=0 desactiva el audio al compartir pantalla",
           "Los GIFs pausados reinician su animacion al volver a pantalla",
-          "Sin arrpc ni Krisp; H.264 y AAC incluidos",
+          "Krisp no disponible; H.264 y AAC incluidos",
           "Notificaciones dependen del portal del escritorio",
           windowing === "wayland"
             ? "Wayland nativo: sin posicion global; el tamano se fija al crear la ventana"
@@ -898,7 +1022,7 @@ fn injection_script(vault: Option<&SessionVault>) -> String {
           "Compartir pantalla no funciona (WebKitGTK no implementa getDisplayMedia)",
           "Voz y video no disponibles: WebKitGTK no expone WebRTC",
           "Los GIFs pausados reinician su animacion al volver a pantalla",
-          "Sin venmic, arrpc, Krisp ni codecs propietarios",
+          "Sin venmic ni codecs propietarios",
           "Notificaciones dependen del portal del escritorio",
           "Pagos, passkeys y captchas pueden detectar WebKit",
         ])
@@ -1068,6 +1192,10 @@ fn injection_script(vault: Option<&SessionVault>) -> String {
         .replace("__VESK_ICON__", art)
         .replace("__VESK_REPO__", VESK_REPO)
         .replace(
+            "__VESK_ARRPC__",
+            if arrpc::enabled() { "true" } else { "false" },
+        )
+        .replace(
             "__VESK_NO_TRACK__",
             if env_flag("VESK_NO_TRACK", true) {
                 "true"
@@ -1216,18 +1344,38 @@ fn create_tray(app: &App) -> tauri::Result<()> {
         true,
     )?;
     audio_menu.append_items(&[&audio_system, &audio_pick, &audio_off])?;
+    let arrpc_toggle = CheckMenuItem::with_id(
+        app,
+        "arrpc-toggle",
+        "Actividad de juegos",
+        true,
+        arrpc::enabled(),
+        None::<&str>,
+    )?;
+    let arrpc_menu = Submenu::with_id(app, "rich-presence", "Rich Presence", true)?;
+    arrpc_menu.append_items(&[&arrpc_toggle])?;
+    let arrpc_toggle_event = arrpc_toggle.clone();
     let separator = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "Salir", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
-        &[&show, &reload, &logout, &devtools, &audio_menu, &separator, &quit],
+        &[
+            &show,
+            &reload,
+            &logout,
+            &devtools,
+            &arrpc_menu,
+            &audio_menu,
+            &separator,
+            &quit,
+        ],
     )?;
 
     let mut builder = TrayIconBuilder::with_id("vesk-tray")
         .tooltip("Vesk")
         .menu(&menu)
         .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id.as_ref() {
+        .on_menu_event(move |app, event| match event.id.as_ref() {
             "show" => reveal(app),
             "reload" => {
                 if let Some(window) = app.get_webview_window("main") {
@@ -1252,6 +1400,15 @@ fn create_tray(app: &App) -> tauri::Result<()> {
                     vault.capture_now();
                 }
                 app.exit(0);
+            }
+            "arrpc-toggle" => {
+                let active = arrpc::set_enabled(!arrpc::enabled());
+                let _ = arrpc_toggle_event.set_checked(active);
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.eval(format!(
+                        "if (window.__VESK_RICH_PRESENCE__) window.__VESK_RICH_PRESENCE__.setEnabled({active});"
+                    ));
+                }
             }
             "audio-system" => screen_audio::set_mode(Mode::System),
             "audio-off" => screen_audio::set_mode(Mode::Off),
@@ -1411,6 +1568,7 @@ mod tests {
         assert!(!script.contains("__VESK_ICON__"));
         assert!(!script.contains("__VESK_VERSION__"));
         assert!(!script.contains("__VESK_WINDOWING__"));
+        assert!(!script.contains("__VESK_ARRPC__"));
         assert!(script.contains(r#"data:image/jpeg;base64,"#));
         assert!(script.contains("window.__VESK_ABOUT__"));
     }
@@ -1446,6 +1604,19 @@ mod tests {
         assert!(!script.contains("__VESK_DOM_OPTIMIZER__"));
         assert!(!script.contains("__VESK_MEDIA_OPTIMIZER__"));
         assert!(!script.contains("__VESK_REPO__"));
+        assert!(!script.contains("__VESK_ARRPC__"));
+        assert!(script.contains("window.__VESK_RICH_PRESENCE__"));
+        assert!(script.contains("setEnabled"));
+        assert!(script.contains("activity: null"));
+        assert!(script.contains("WebRichPresence (arRPC)"));
+        assert!(script.contains("ws://127.0.0.1:1337"));
+    }
+
+    #[test]
+    fn vencord_incluye_arrpc() {
+        assert!(VENCORD_BUNDLE.contains("WebRichPresence (arRPC)"));
+        assert!(VENCORD_BUNDLE.contains("ws://127.0.0.1:1337"));
+        assert!(VENCORD_BUNDLE.contains("handleEvent"));
     }
 
     #[test]

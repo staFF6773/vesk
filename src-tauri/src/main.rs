@@ -76,6 +76,9 @@ const VESK_SETTINGS_ENTRY: &str = r#"o({key:"vesk_main",title:"Vesk",panelTitle:
 /// 104 px, asi que en base64 anadia ~120 KB al script de inyeccion.
 const VESK_ART: &[u8] = include_bytes!("../../assets/splash.jpg");
 
+/// Repositorio publico del proyecto, enlazado desde la pagina de ajustes.
+const VESK_REPO: &str = "https://github.com/staFF6773/vesk";
+
 /// Codifica el arte como data URI sin anadir dependencias. Se cachea porque el
 /// script de inyeccion lo pide en cada arranque.
 fn vesk_art_data_uri() -> &'static str {
@@ -466,6 +469,147 @@ fn injection_script(vault: Option<&SessionVault>) -> String {
     };
   }
 
+  // Reproduccion eficiente de videos y GIFs: pausa lo que esta fuera de
+  // pantalla y lo que deja de verse al ocultar la ventana. No toca los videos
+  // de llamadas o compartir pantalla (srcObject) ni corta el audio audible.
+  const MEDIA_OPTIMIZER = __VESK_MEDIA_OPTIMIZER__;
+
+  if (MEDIA_OPTIMIZER) {
+    const GIF_PLACEHOLDER =
+      "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+    const MARGIN = 300;
+    const autoPaused = new WeakSet();
+    const gifState = new WeakMap();
+    const observed = new WeakSet();
+
+    const isVideo = (el) => !!el && el.tagName === "VIDEO";
+    const isImage = (el) => !!el && el.tagName === "IMG";
+    const isCallVideo = (el) => isVideo(el) && !!el.srcObject;
+    const isSilent = (el) => el.muted || el.volume === 0 || el.hasAttribute("loop");
+    const isGif = (el) => {
+      if (!isImage(el)) return false;
+      const raw = el.currentSrc || el.src || "";
+      if (!raw || raw.indexOf("data:") === 0) return false;
+      try {
+        return new URL(raw, location.href).pathname.toLowerCase().endsWith(".gif");
+      } catch (e) {
+        return false;
+      }
+    };
+    const isMedia = (el) => isVideo(el) || isGif(el);
+    const onScreen = (el) => {
+      if (!el.isConnected) return false;
+      const rect = el.getBoundingClientRect();
+      return (
+        rect.bottom > -MARGIN &&
+        rect.top < window.innerHeight + MARGIN &&
+        rect.right > 0 &&
+        rect.left < window.innerWidth
+      );
+    };
+
+    const pauseVideo = (el, onlySilent) => {
+      if (isCallVideo(el) || el.paused || el.ended) return;
+      if (onlySilent && !isSilent(el)) return;
+      autoPaused.add(el);
+      el.pause();
+    };
+
+    const pauseGif = (el) => {
+      if (!isImage(el) || gifState.has(el)) return;
+      const src = el.getAttribute("src");
+      const srcset = el.hasAttribute("srcset") ? el.getAttribute("srcset") : null;
+      gifState.set(el, { src, srcset });
+      el.removeAttribute("srcset");
+      el.setAttribute("src", GIF_PLACEHOLDER);
+    };
+
+    const resume = (el) => {
+      if (isVideo(el)) {
+        if (!autoPaused.has(el)) return;
+        autoPaused.delete(el);
+        if (el.isConnected) {
+          const playing = el.play();
+          if (playing && typeof playing.catch === "function") playing.catch(() => {});
+        }
+        return;
+      }
+
+      const state = gifState.get(el);
+      if (!state) return;
+      gifState.delete(el);
+      // React pudo reemplazar la imagen mientras estaba pausada: no pisar el src nuevo.
+      if (el.getAttribute("src") !== GIF_PLACEHOLDER) return;
+      if (state.src === null) el.removeAttribute("src");
+      else el.setAttribute("src", state.src);
+      if (state.srcset === null) el.removeAttribute("srcset");
+      else el.setAttribute("srcset", state.srcset);
+    };
+
+    const pauseOffscreen = (el) => {
+      if (isVideo(el)) pauseVideo(el, false);
+      else if (isGif(el) || gifState.has(el)) pauseGif(el);
+    };
+
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            if (!document.hidden) resume(entry.target);
+          } else if (!document.hidden) {
+            pauseOffscreen(entry.target);
+          }
+        }
+      },
+      { rootMargin: MARGIN + "px 0px" }
+    );
+
+    const track = (root) => {
+      if (!root) return;
+      if (root.nodeType === 1 && isMedia(root) && !observed.has(root)) {
+        observed.add(root);
+        io.observe(root);
+      }
+      if (!root.querySelectorAll) return;
+      root.querySelectorAll("video, img").forEach((el) => {
+        if (!isMedia(el) || observed.has(el)) return;
+        observed.add(el);
+        io.observe(el);
+      });
+    };
+
+    track(document);
+
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        record.addedNodes.forEach((node) => track(node));
+        record.removedNodes.forEach((node) => {
+          if (node.nodeType !== 1) return;
+          if (isMedia(node)) io.unobserve(node);
+          if (node.querySelectorAll) {
+            node.querySelectorAll("video, img").forEach((el) => io.unobserve(el));
+          }
+        });
+      }
+    });
+    observer.observe(document, { childList: true, subtree: true });
+
+    document.addEventListener("visibilitychange", () => {
+      document.querySelectorAll("video").forEach((el) => {
+        if (document.hidden) pauseVideo(el, true);
+        else if (onScreen(el)) resume(el);
+      });
+
+      document.querySelectorAll("img").forEach((el) => {
+        if (document.hidden) {
+          if (isGif(el) || gifState.has(el)) pauseGif(el);
+        } else if (gifState.has(el) && onScreen(el)) {
+          resume(el);
+        }
+      });
+    });
+  }
+
   // Preconexion a los origenes que Discord usa despues del documento inicial.
   (() => {
     const root = document.head || document.documentElement;
@@ -489,6 +633,7 @@ fn injection_script(vault: Option<&SessionVault>) -> String {
     window: "__VESK_WINDOWING__",
     version: "__VESK_VERSION__",
     art: "__VESK_ICON__",
+    repo: "__VESK_REPO__",
   };
 
   console.log(
@@ -511,24 +656,73 @@ fn injection_script(vault: Option<&SessionVault>) -> String {
     const art = (window.__VESK__ && window.__VESK__.art) || "";
     const engine = (window.__VESK__ && window.__VESK__.engine) || "webkit";
     const windowing = (window.__VESK__ && window.__VESK__.window) || "x11";
+    const repo =
+      (window.__VESK__ && window.__VESK__.repo) ||
+      "https://github.com/staFF6773/vesk";
+    const cardStyle = {
+      padding: "16px 18px",
+      borderRadius: 8,
+      border:
+        "1px solid var(--background-modifier-accent, rgba(255,255,255,.06))",
+      background: "var(--background-secondary, #2b2d31)",
+    };
     const titleStyle = {
-      color: "var(--header-primary)",
+      color: "var(--header-primary, #f2f3f5)",
       fontSize: 12,
       fontWeight: 700,
       letterSpacing: ".02em",
       textTransform: "uppercase",
-      margin: "24px 0 8px",
+      margin: "0 0 10px",
     };
-    const item = (text) => h("li", { key: text, style: { marginBottom: 4 } }, text);
+    const pillStyle = {
+      display: "inline-flex",
+      alignItems: "center",
+      padding: "2px 8px",
+      borderRadius: 999,
+      fontSize: 12,
+      fontWeight: 600,
+      color: "var(--text-normal, #dbdee1)",
+      background:
+        "var(--background-modifier-selected, rgba(255,255,255,.08))",
+      border:
+        "1px solid var(--background-modifier-accent, rgba(255,255,255,.06))",
+    };
+    const linkStyle = {
+      color: "var(--text-link, #00a8fc)",
+      textDecoration: "none",
+      fontWeight: 600,
+    };
+    const buttonStyle = {
+      display: "inline-flex",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: "8px 14px",
+      borderRadius: 6,
+      background: "var(--brand-500, #5865f2)",
+      color: "#fff",
+      textDecoration: "none",
+      fontWeight: 600,
+      fontSize: 14,
+    };
+    const secondaryButtonStyle = {
+      ...buttonStyle,
+      color: "var(--text-normal, #dbdee1)",
+      background:
+        "var(--background-modifier-selected, rgba(255,255,255,.08))",
+      border:
+        "1px solid var(--background-modifier-accent, rgba(255,255,255,.06))",
+    };
+    const item = (text) =>
+      h("li", { key: text, style: { marginBottom: 6 } }, text);
     const group = (title, items) =>
       h(
-        "div",
-        null,
+        "section",
+        { style: cardStyle },
         h("h5", { style: titleStyle }, title),
         h("ul", { style: { margin: 0, paddingLeft: 20 } }, items.map(item))
       );
 
-    // Banner al estilo de la tarjeta de Vencord, con el arte del programa.
+    // Banner con el arte del programa, version, motor y enlace al repositorio.
     const banner = h(
       "div",
       {
@@ -536,32 +730,76 @@ fn injection_script(vault: Option<&SessionVault>) -> String {
           display: "flex",
           alignItems: "center",
           gap: 24,
-          padding: "20px 24px",
+          padding: 24,
           borderRadius: 8,
           overflow: "hidden",
-          border: "1px solid var(--background-modifier-accent)",
-          background: "linear-gradient(135deg, #2b2d31 0%, #1e1f22 100%)",
+          border:
+            "1px solid var(--background-modifier-accent, rgba(255,255,255,.06))",
+          background:
+            "linear-gradient(135deg, var(--background-secondary, #2b2d31) 0%, var(--background-tertiary, #1e1f22) 100%)",
+          flexWrap: "wrap",
         },
       },
       h(
         "div",
-        { style: { flex: 1, minWidth: 0 } },
+        { style: { flex: "1 1 320px", minWidth: 0 } },
         h(
-          "h2",
-          { style: { color: "#ffffff", margin: 0, fontSize: 24 } },
-          version ? "Vesk " + version : "Vesk"
-        ),
-        h(
-          "p",
-          { style: { color: "rgba(255,255,255,.8)", margin: "6px 0 0" } },
-          "Shell de Discord en Rust + Tauri 2 con Vencord inyectado en el webview del sistema."
+          "div",
+          {
+            style: {
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              flexWrap: "wrap",
+              marginBottom: 8,
+            },
+          },
+          h(
+            "h2",
+            {
+              style: {
+                color: "var(--header-primary, #f2f3f5)",
+                margin: 0,
+                fontSize: 26,
+              },
+            },
+            "Vesk"
+          ),
+          version ? h("span", { style: pillStyle }, "v" + version) : null
         ),
         h(
           "p",
           {
             style: {
-              color: "rgba(255,255,255,.9)",
-              margin: "12px 0 0",
+              color: "var(--text-muted, #949ba4)",
+              margin: "0 0 14px",
+            },
+          },
+          "Shell de Discord en Rust + Tauri 2 con Vencord inyectado en el webview del sistema."
+        ),
+        h(
+          "div",
+          { style: { display: "flex", gap: 8, flexWrap: "wrap" } },
+          h("span", { style: pillStyle }, engine === "cef" ? "CEF" : "WebKitGTK"),
+          h("span", { style: pillStyle }, windowing === "wayland" ? "Wayland" : "X11"),
+          h("span", { style: pillStyle }, "GPL-3.0")
+        ),
+        h(
+          "div",
+          { style: { display: "flex", gap: 10, flexWrap: "wrap", marginTop: 16 } },
+          h("a", { href: repo, style: buttonStyle }, "Ver repositorio"),
+          h(
+            "a",
+            { href: repo + "/issues", style: secondaryButtonStyle },
+            "Reportar un problema"
+          )
+        ),
+        h(
+          "p",
+          {
+            style: {
+              color: "var(--text-muted, #949ba4)",
+              margin: "14px 0 0",
               fontWeight: 600,
             },
           },
@@ -571,15 +809,38 @@ fn injection_script(vault: Option<&SessionVault>) -> String {
       art &&
         h("img", {
           src: art,
-          alt: "",
+          alt: "Vesk",
           style: {
-            width: 104,
-            height: 104,
-            borderRadius: 12,
+            width: 120,
+            height: 120,
+            borderRadius: 16,
             objectFit: "cover",
             flexShrink: 0,
           },
         })
+    );
+
+    const project = h(
+      "section",
+      { style: { ...cardStyle, marginTop: 16 } },
+      h("h5", { style: titleStyle }, "Proyecto"),
+      h(
+        "p",
+        { style: { margin: "0 0 8px", color: "var(--text-muted, #949ba4)" } },
+        "Codigo fuente, issues y versiones."
+      ),
+      h(
+        "p",
+        { style: { margin: 0 } },
+        h("a", { href: repo, style: linkStyle }, "github.com/staFF6773/vesk"),
+        h("span", { style: { color: "var(--text-muted, #949ba4)" } }, " · "),
+        h("a", { href: repo + "/issues", style: linkStyle }, "Issues")
+      ),
+      h(
+        "p",
+        { style: { margin: "8px 0 0", color: "var(--text-muted, #949ba4)" } },
+        "Licencia GPL-3.0-or-later."
+      )
     );
 
     return h(
@@ -587,45 +848,62 @@ fn injection_script(vault: Option<&SessionVault>) -> String {
       {
         style: {
           padding: "24px 40px 40px",
-          maxWidth: 720,
+          maxWidth: 780,
           fontSize: 14,
           lineHeight: 1.5,
-          color: "var(--text-normal)",
+          color: "var(--text-normal, #dbdee1)",
         },
       },
       banner,
-      group("Que funciona", engine === "cef" ? [
-        "Cliente web de Discord y enlaces discord://",
-        "Vencord inyectado al inicio del documento",
-        "Voz y video con WebRTC de Chromium (CEF)",
-        "Compartir pantalla con el audio del sistema (PipeWire)",
-        "Bandeja del sistema: mostrar, recargar, cerrar sesion, salir",
-        windowing === "wayland"
-          ? "Sesion persistente; el compositor decide tamano y posicion"
-          : "Sesion persistente y tamano/posicion de ventana",
-        "Enlaces externos en el navegador del sistema",
-      ] : [
-        "Cliente web de Discord y enlaces discord://",
-        "Vencord inyectado al inicio del documento",
-        "Bandeja del sistema: mostrar, recargar, cerrar sesion, salir",
-        "Sesion persistente y tamano/posicion de ventana",
-        "Enlaces externos en el navegador del sistema",
-      ]),
-      group("Limitaciones conocidas", engine === "cef" ? [
-        "Al compartir pantalla se envia el audio de todo el sistema, no por aplicacion",
-        "VESK_SCREEN_AUDIO=0 desactiva el audio al compartir pantalla",
-        "Sin arrpc, Krisp ni codecs propietarios",
-        "Notificaciones dependen del portal del escritorio",
-        windowing === "wayland"
-          ? "Wayland nativo: sin posicion global; el tamano se fija al crear la ventana"
-          : "XWayland; VESK_GDK_BACKEND=wayland usa el backend nativo",
-      ] : [
-        "Compartir pantalla no funciona (WebKitGTK no implementa getDisplayMedia)",
-        "Voz y video no disponibles: WebKitGTK no expone WebRTC",
-        "Sin venmic, arrpc, Krisp ni codecs propietarios",
-        "Notificaciones dependen del portal del escritorio",
-        "Pagos, passkeys y captchas pueden detectar WebKit",
-      ])
+      h(
+        "div",
+        {
+          style: {
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
+            gap: 16,
+            marginTop: 16,
+          },
+        },
+        group("Que funciona", engine === "cef" ? [
+          "Cliente web de Discord y enlaces discord://",
+          "Vencord inyectado al inicio del documento",
+          "Pausa videos y GIFs fuera de pantalla",
+          "Reproduce GIFs y videos H.264/AAC",
+          "Voz y video con WebRTC de Chromium (CEF)",
+          "Compartir pantalla con el audio del sistema (PipeWire)",
+          "Bandeja del sistema: mostrar, recargar, cerrar sesion, salir",
+          windowing === "wayland"
+            ? "Sesion persistente; el compositor decide tamano y posicion"
+            : "Sesion persistente y tamano/posicion de ventana",
+          "Enlaces externos en el navegador del sistema",
+        ] : [
+          "Cliente web de Discord y enlaces discord://",
+          "Vencord inyectado al inicio del documento",
+          "Pausa videos y GIFs fuera de pantalla",
+          "Bandeja del sistema: mostrar, recargar, cerrar sesion, salir",
+          "Sesion persistente y tamano/posicion de ventana",
+          "Enlaces externos en el navegador del sistema",
+        ]),
+        group("Limitaciones conocidas", engine === "cef" ? [
+          "Al compartir pantalla se envia el audio de todo el sistema, no por aplicacion",
+          "VESK_SCREEN_AUDIO=0 desactiva el audio al compartir pantalla",
+          "Los GIFs pausados reinician su animacion al volver a pantalla",
+          "Sin arrpc ni Krisp; H.264 y AAC incluidos",
+          "Notificaciones dependen del portal del escritorio",
+          windowing === "wayland"
+            ? "Wayland nativo: sin posicion global; el tamano se fija al crear la ventana"
+            : "XWayland; VESK_GDK_BACKEND=wayland usa el backend nativo",
+        ] : [
+          "Compartir pantalla no funciona (WebKitGTK no implementa getDisplayMedia)",
+          "Voz y video no disponibles: WebKitGTK no expone WebRTC",
+          "Los GIFs pausados reinician su animacion al volver a pantalla",
+          "Sin venmic, arrpc, Krisp ni codecs propietarios",
+          "Notificaciones dependen del portal del escritorio",
+          "Pagos, passkeys y captchas pueden detectar WebKit",
+        ])
+      ),
+      project
     );
   };
 
@@ -788,6 +1066,7 @@ fn injection_script(vault: Option<&SessionVault>) -> String {
         .replace("__VESK_WINDOWING__", windowing)
         .replace("__VESK_VERSION__", env!("CARGO_PKG_VERSION"))
         .replace("__VESK_ICON__", art)
+        .replace("__VESK_REPO__", VESK_REPO)
         .replace(
             "__VESK_NO_TRACK__",
             if env_flag("VESK_NO_TRACK", true) {
@@ -799,6 +1078,14 @@ fn injection_script(vault: Option<&SessionVault>) -> String {
         .replace(
             "__VESK_DOM_OPTIMIZER__",
             if env_flag("VESK_DOM_OPTIMIZER", true) {
+                "true"
+            } else {
+                "false"
+            },
+        )
+        .replace(
+            "__VESK_MEDIA_OPTIMIZER__",
+            if env_flag("VESK_MEDIA_OPTIMIZER", true) {
                 "true"
             } else {
                 "false"
@@ -1157,6 +1444,26 @@ mod tests {
         assert!(script.contains("preconnect"));
         assert!(!script.contains("__VESK_NO_TRACK__"));
         assert!(!script.contains("__VESK_DOM_OPTIMIZER__"));
+        assert!(!script.contains("__VESK_MEDIA_OPTIMIZER__"));
+        assert!(!script.contains("__VESK_REPO__"));
+    }
+
+    #[test]
+    fn acerca_enlaza_al_repositorio() {
+        let script = injection_script(None);
+        assert!(script.contains(VESK_REPO));
+        assert!(script.contains("Ver repositorio"));
+        assert!(script.contains("repo:"));
+    }
+
+    #[test]
+    fn optimizador_de_medios() {
+        let script = injection_script(None);
+        assert!(script.contains("IntersectionObserver"));
+        assert!(script.contains("visibilitychange"));
+        assert!(script.contains("srcObject"));
+        assert!(script.contains("data:image/gif;base64,"));
+        assert!(!script.contains("__VESK_MEDIA_OPTIMIZER__"));
     }
 
     #[test]

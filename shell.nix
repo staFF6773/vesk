@@ -1,37 +1,11 @@
 { pkgs ? import <nixpkgs> { } }:
 let
   # CEF 150 es la version contra la que compila el fork de Sable. El binario
-  # de nixpkgs es mas nuevo, asi que lo sobreescribimos con el que Sable usa
-  # en produccion (mismo chromium y mismos hashes).
-  cef = pkgs.cef-binary.override {
-    version = "150.0.14";
-    gitRevision = "7c1aa68";
-    chromiumVersion = "150.0.7871.129";
-    srcHashes = {
-      x86_64-linux = "sha256-QO9hPkVcrNB6p8gfQl76qLb3frg/E8wo1HDuuk5h+Y8=";
-    };
-  };
-
-  # Evita que el build script de cef-rs intente descargar CEF otra vez.
-  fakeArchiveJson = pkgs.writeText "archive.json" (
-    builtins.toJSON {
-      name = cef.src.name;
-      sha1 = "";
-      type = "minimal";
-    }
-  );
-
-  cefFlat = pkgs.symlinkJoin {
-    name = "cef-${cef.version}-flat";
-    paths = [
-      "${cef}/${cef.buildType}"
-      "${cef}/Resources"
-    ];
-    postBuild = ''
-      ln -s ${cef}/libcef_dll "$out/"
-      ln -s ${fakeArchiveJson} "$out/archive.json"
-    '';
-  };
+  # oficial de Spotify no incluye H.264/AAC (proprietary_codecs=false), y por
+  # eso Discord no reproduce GIFs ni videos. Usamos el paquete de Arch, que es
+  # el mismo commit de CEF pero compilado con ffmpeg_branding="Chrome" y
+  # proprietary_codecs=true. Ver nix/cef-codecs.nix.
+  cefFlat = pkgs.callPackage ./nix/cef-codecs.nix { };
 
   cefRuntimeLibs = with pkgs; [
     alsa-lib

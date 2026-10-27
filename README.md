@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="src-tauri/icons/128x128@2x.png" alt="Logo de Vesk" width="144">
+</p>
+
 # Vesk
 
 Reimplementacion del **shell** de [Vesktop](https://github.com/Vencord/Vesktop) en Rust con
@@ -43,6 +47,15 @@ no expone posicion global de ventana: `set_size`/`set_position` son no-ops y el 
 ventana que guarda `tauri-plugin-window-state` no es fiable. Mostrar/ocultar, foco,
 maximizar y pantalla completa si funcionan.
 
+### CEF y codecs
+
+`nix/cef-codecs.nix` extrae el paquete oficial de Arch `cef 150.0.14-1` (mismo commit
+`7c1aa68` y Chromium `150.0.7871.129` que el tarball de CEF). A diferencia del tarball
+oficial, viene compilado con `proprietary_codecs=true`, asi que reproduce los MP4
+H.264/AAC de Discord. Usa `libjpeg8` de nixpkgs para el ABI `libjpeg.so.8` y empaqueta
+`libopenh264.so.8` de Arch; `codec_probe` de `tauri-runtime-cef` confirma que tanto el
+MP4 H.264/AAC como el WebM VP9/Opus se reproducen.
+
 ### GSettings en NixOS
 
 GTK y WebKit sacan tema, fuentes, escalado y preferencias de GSettings. Si el perfil no tiene
@@ -75,6 +88,10 @@ Vesk aplica en el contenedor lo que OpenAsar hace en el proceso principal de Ele
 - **Optimizador de DOM**: retrasa 100 ms el `removeChild` de los nodos de actividad de la
   lista de miembros, que React reescribe constantemente. `VESK_DOM_OPTIMIZER=0` lo
   desactiva.
+- **Reproduccion eficiente de medios**: pausa videos y GIFs que salen del viewport y, al
+  ocultar la ventana, solo los mudos o en bucle (el audio audible sigue). No toca los
+  videos de llamadas ni de compartir pantalla (`srcObject`). Los GIFs pausados reinician
+  su animacion al volver. `VESK_MEDIA_OPTIMIZER=0` lo desactiva.
 - **Reposo real**: al ocultarse, `Webview::hide()` avisa a CEF (`was_hidden`) y ya no
   se desactiva `IntensiveWakeUpThrottling` ni el throttling de timers, asi que Chromium
   deja de componer y estrangula a Discord. Medido en este equipo con `/proc`:
@@ -99,6 +116,8 @@ Vesk aplica en el contenedor lo que OpenAsar hace en el proceso principal de Ele
 ## Que funciona
 
 - Carga `discord.com/app` con User-Agent de Chrome.
+- Reproduce GIFs y videos MP4 H.264/AAC: el CEF de Arch incluye los codecs
+  propietarios que Discord usa para los adjuntos.
 - Splash de carga con el arte del programa (anillo girando + imagen pulsando) que se desvanece
   cuando Discord ya renderizo la app.
 - Inyeccion de Vencord (build *userscript*) en el mundo principal, antes de que arranque Discord.
@@ -193,7 +212,7 @@ El backend por defecto es **CEF** (Chromium embebido). El backend `wry` usa WebK
   eco) o solo una aplicacion concreta. Elige el modo en el submenu **Audio al compartir
   pantalla** de la bandeja. `VESK_SCREEN_AUDIO=0` desactiva el parche.
 - **arrpc**: el Rich Presence de juegos y apps locales no esta implementado.
-- **Krisp / codecs propietarios**: no disponibles.
+- **Krisp**: no disponible. H.264 y AAC si estan incluidos en el CEF de Arch.
 - **Notificaciones**: dependen del portal del escritorio; no hay integracion nativa aun.
 - Algunos flujos de Discord (pagos, passkeys, captchas) pueden detectar el entorno.
 
@@ -222,6 +241,7 @@ ui/index.html               fallback local (no se usa para Discord)
 assets/icon-source.jpeg     imagen original del icono
 scripts/fetch-vencord.sh
 packaging/vesk.desktop
+nix/cef-codecs.nix          CEF 150 de Arch con H.264/AAC
 shell.nix / flake.nix
 ```
 
